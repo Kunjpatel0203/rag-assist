@@ -16,3 +16,9 @@ data/
 # OS
 .DS_Store
 
+
+# Extra virtual environments
+.venv*/
+
+# Uploaded user documents
+temp_uploads/

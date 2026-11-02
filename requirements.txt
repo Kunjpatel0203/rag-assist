@@ -13,3 +13,4 @@ tiktoken
 openai
 langchain-text-splitters
 python-dotenv
+ragas

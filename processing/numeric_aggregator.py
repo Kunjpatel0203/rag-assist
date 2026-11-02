@@ -403,27 +403,31 @@ def pick_best_numeric_column(question, df_columns):
 # ----------------------------
 def numeric_aggregate(retrieved_metadata, question, structured_excel_path):
 
-    # If not numeric-type question → let normal RAG handle
+    # ✅ FIX 1: skip if no excel
+    if not structured_excel_path:
+        return None
+
+    # ✅ FIX 2: skip non-numeric questions
     if not question_requests_numeric(question):
         return None
 
-    # Load FULL dataframe for correct math
-    df = pd.read_excel(structured_excel_path)
+    try:
+        df = pd.read_excel(structured_excel_path)
+    except Exception as e:
+        print("Excel error:", e)
+        return None
+
     df.columns = [normalize(c) for c in df.columns]
 
     operation = detect_operation(question)
 
-    # Pick correct numeric column
     target_col = pick_best_numeric_column(question, df.columns)
     if not target_col or target_col not in df.columns:
         return None
 
-    # Detect entity from FAISS retrieved rows
     entity = detect_entity_from_rows(question, retrieved_metadata)
 
-    # ---------------- ENTITY LOOKUP ----------------
     if entity:
-        # find product/name column
         name_col = None
         for col in df.columns:
             if "name" in col or "product" in col or "item" in col:
@@ -440,7 +444,6 @@ def numeric_aggregate(retrieved_metadata, question, structured_excel_path):
         value = row.iloc[0][target_col]
         return f"{target_col} is {value}"
 
-    # ---------------- GLOBAL AGGREGATION ----------------
     if operation == "sum":
         total = pd.to_numeric(df[target_col], errors="coerce").sum()
         return f"{target_col} total is {total}"
