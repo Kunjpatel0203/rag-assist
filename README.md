@@ -48,9 +48,9 @@ flowchart LR
 ```mermaid
 flowchart TD
     A["Upload file or URL<br/>POST /ingest"] --> B{"File type?"}
-    B -- "PDF / DOCX / PPTX" --> C["Layout-aware extraction<br/>(unstructured, hi_res)<br/>sections, pages, tables"]
+    B -- "PDF / DOCX / PPTX" --> C["Structure-aware extraction<br/>(unstructured)<br/>sections, pages, tables"]
     B -- "XLSX / CSV" --> D["Header detection on every sheet<br/>each row → a self-describing fact"]
-    B -- "URL" --> E["Headless browser (Playwright)<br/>page text + linked documents"]
+    B -- "URL" --> E["Headless browser (Playwright)<br/>page text + every linked<br/>PDF / Office / Excel file"]
     D --> D2["Original file kept for<br/>exact numeric queries"]
     C --> F["Chunking<br/>800 chars, 100 overlap"]
     E --> F
@@ -61,9 +61,13 @@ flowchart TD
 ```
 
 1. **Extraction.** Each source type has its own extractor:
-   - **PDF / Word / PowerPoint**: parsed with `unstructured` in `hi_res` mode, which understands layout. Titles become the *section* of the text that follows, and each element keeps its page number and type. Tables are converted row by row into `header: value` pairs so a row stays readable on its own.
+   - **PDF / Word / PowerPoint**: parsed with `unstructured`, which reads the text layer directly and only falls back to OCR for scanned files. Titles become the *section* of the text that follows, and each element keeps its page number and type. Tables are converted row by row into `header: value` pairs so a row stays readable on its own. Elements are grouped by section and page, small neighbouring groups are packed together, and each chunk is prefixed with its section title so it carries its own context.
    - **Excel / CSV**: every sheet is loaded with automatic header-row detection. Each row becomes a sentence like `product name: widget a. price: 12.5. stock: 40.` — a complete fact that still makes sense when retrieved alone. The original file is also stored for exact calculations (see below).
-   - **URLs**: a headless Chromium browser renders the page (so JavaScript-heavy sites work) and also downloads PDF/Office/Excel files linked from tables on the page, which are then ingested too.
+   - **URLs**: a headless Chromium browser renders the page (so JavaScript-heavy sites work) and indexes its visible text. It then scans **every link on the page** and downloads the PDF / Word / PowerPoint / Excel / CSV files among them, which are ingested like uploads:
+     - file type is read from the link's path, so `report.pdf?version=2` counts;
+     - links without an extension (e.g. `/download?id=123`) are fetched when they look like downloads, and kept if the server reports a document type;
+     - downloads use the browser session (keeping the site's cookies), skip links that return a web page instead of a file, and are stored in a separate folder per URL so names never clash;
+     - at most 50 documents are downloaded per page.
 2. **Chunking.** Text is split with a recursive splitter into ~800-character chunks with 100 characters of overlap, so sentences cut at a boundary still appear whole in one of the neighbouring chunks.
 3. **Storage.** Chunks are written to `data/chunks/compliance_<workspace>/` (for keyword search) and embedded into a FAISS index at `data/embeddings/compliance_<workspace>/` (for semantic search). New uploads are *added* to the existing index, so earlier documents don't need to be re-embedded.
 
