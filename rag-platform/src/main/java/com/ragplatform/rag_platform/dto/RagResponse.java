@@ -1,0 +1,14 @@
+package com.ragplatform.rag_platform.dto;
+
+public class RagResponse {
+
+    private String answer;
+
+    public String getAnswer() {
+        return answer;
+    }
+
+    public void setAnswer(String answer) {
+        this.answer = answer;
+    }
+}
