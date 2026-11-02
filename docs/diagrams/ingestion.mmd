@@ -1,0 +1,12 @@
+flowchart TD
+    A["Upload file or URL<br/>POST /ingest"] --> B{"File type?"}
+    B -- "PDF / DOCX / PPTX" --> C["Structure-aware extraction<br/>(unstructured)<br/>sections, pages, tables"]
+    B -- "XLSX / CSV" --> D["Header detection on every sheet<br/>each row → a self-describing fact"]
+    B -- "URL" --> E["Headless browser (Playwright)<br/>page text + every linked<br/>PDF / Office / Excel file"]
+    D --> D2["Original file kept for<br/>exact numeric queries"]
+    C --> F["Chunking<br/>800 chars, 100 overlap"]
+    E --> F
+    D --> G
+    F --> G["Save chunks as text<br/>(used by BM25)"]
+    G --> H["Embed with<br/>text-embedding-3-small"]
+    H --> I[("FAISS index<br/>per workspace")]

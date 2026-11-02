@@ -1,0 +1,20 @@
+sequenceDiagram
+    participant FE as Frontend
+    participant BE as Spring Boot
+    participant PY as RAG engine
+    participant LLM as LLM
+
+    FE->>BE: POST /ai/ask {chatId, content}
+    BE->>BE: Load last 6 messages of the chat
+    BE->>PY: POST /ask {workspace_id, question, chatHistory}
+    PY->>LLM: 1. Rewrite follow-up into a standalone question
+    PY->>LLM: 2. Generate 2–3 search-style rephrasings
+    PY->>PY: 3a. Dense search — FAISS top 15
+    PY->>PY: 3b. Keyword search — BM25 top 10
+    PY->>PY: 4. Numeric question + spreadsheet? → compute with pandas
+    PY->>PY: 5. Merge + de-duplicate candidates
+    PY->>LLM: 6. Score each candidate 0–10, keep top 6
+    PY->>LLM: 7. Answer from those 6 chunks only (strict prompt)
+    PY-->>BE: {answer}
+    BE->>BE: Save question + answer to MongoDB
+    BE-->>FE: {answer}

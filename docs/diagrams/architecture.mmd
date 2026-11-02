@@ -1,0 +1,8 @@
+flowchart TB
+    U["User (browser)"] --> FE["valora-frontend<br/>React + Vite · port 5173"]
+    FE -- "auth · workspaces · chats · questions" --> BE["rag-platform<br/>Spring Boot · port 8080"]
+    FE -- "upload · list · open documents" --> PY["RAG engine<br/>FastAPI · port 8000"]
+    BE -- "/ask · /ingest" --> PY
+    BE --> DB[("MongoDB<br/>users · workspaces · chats · messages")]
+    PY --> VS[("FAISS index + chunk files<br/>one per workspace")]
+    PY --> LLM["OpenAI<br/>gpt-4o-mini · text-embedding-3-small"]

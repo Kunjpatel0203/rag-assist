@@ -1,5 +1,13 @@
 # Valora — Document Q&A with Hybrid RAG
 
+![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)
+![LangChain](https://img.shields.io/badge/LangChain-1C3C3C?logo=langchain&logoColor=white)
+![FAISS](https://img.shields.io/badge/FAISS-vector%20search-0467DF)
+![Spring Boot](https://img.shields.io/badge/Spring%20Boot-6DB33F?logo=springboot&logoColor=white)
+![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)
+![MongoDB](https://img.shields.io/badge/MongoDB-47A248?logo=mongodb&logoColor=white)
+
 Valora lets you create **workspaces**, upload documents (PDF, Word, PowerPoint, Excel/CSV) or web links, and then **chat with them**. Every answer is grounded in the uploaded content: if the documents don't contain the answer, Valora says so instead of guessing.
 
 Under the hood it is a **hybrid Retrieval-Augmented Generation (RAG)** engine that combines semantic search, keyword (BM25) search, LLM reranking and exact numeric computation over spreadsheets.
@@ -24,16 +32,12 @@ Under the hood it is a **hybrid Retrieval-Augmented Generation (RAG)** engine th
 
 The system has three services:
 
-```mermaid
-flowchart LR
-    U["User (browser)"] --> FE["valora-frontend<br/>React + Vite<br/>:5173"]
-    FE -- "auth, workspaces,<br/>chats, questions" --> BE["rag-platform<br/>Spring Boot<br/>:8080"]
-    FE -- "upload / list /<br/>open documents" --> PY["RAG engine<br/>FastAPI<br/>:8000"]
-    BE -- "/ask, /ingest" --> PY
-    BE --> DB[("MongoDB<br/>users, workspaces,<br/>chats, messages")]
-    PY --> VS[("FAISS index +<br/>chunk files<br/>per workspace")]
-    PY --> LLM["OpenAI<br/>gpt-4o-mini +<br/>text-embedding-3-small"]
-```
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/architecture-dark.svg">
+    <img src="docs/images/architecture-light.svg" alt="Architecture: the React frontend talks to the Spring Boot backend (auth, workspaces, chats, questions) and to the RAG engine (documents); the backend stores data in MongoDB and calls the RAG engine, which uses a FAISS index per workspace and OpenAI" width="100%">
+  </picture>
+</p>
 
 | Service | Responsibility |
 |---|---|
@@ -45,20 +49,12 @@ flowchart LR
 
 ## How a document is ingested
 
-```mermaid
-flowchart TD
-    A["Upload file or URL<br/>POST /ingest"] --> B{"File type?"}
-    B -- "PDF / DOCX / PPTX" --> C["Structure-aware extraction<br/>(unstructured)<br/>sections, pages, tables"]
-    B -- "XLSX / CSV" --> D["Header detection on every sheet<br/>each row → a self-describing fact"]
-    B -- "URL" --> E["Headless browser (Playwright)<br/>page text + every linked<br/>PDF / Office / Excel file"]
-    D --> D2["Original file kept for<br/>exact numeric queries"]
-    C --> F["Chunking<br/>800 chars, 100 overlap"]
-    E --> F
-    D --> G
-    F --> G["Save chunks as text<br/>(used by BM25)"]
-    G --> H["Embed with<br/>text-embedding-3-small"]
-    H --> I[("FAISS index<br/>per workspace")]
-```
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/ingestion-dark.svg">
+    <img src="docs/images/ingestion-light.svg" alt="Ingestion flow: files and URLs are routed by type to the spreadsheet row extractor, the structure-aware document extractor or the headless browser, then chunked, saved for BM25 and embedded into the workspace's FAISS index" width="100%">
+  </picture>
+</p>
 
 1. **Extraction.** Each source type has its own extractor:
    - **PDF / Word / PowerPoint**: parsed with `unstructured`, which reads the text layer directly and only falls back to OCR for scanned files. Titles become the *section* of the text that follows, and each element keeps its page number and type. Tables are converted row by row into `header: value` pairs so a row stays readable on its own. Elements are grouped by section and page, small neighbouring groups are packed together, and each chunk is prefixed with its section title so it carries its own context.
@@ -75,28 +71,12 @@ flowchart TD
 
 ## How a question is answered
 
-```mermaid
-sequenceDiagram
-    participant FE as Frontend
-    participant BE as Spring Boot
-    participant PY as RAG engine
-    participant LLM as LLM
-
-    FE->>BE: POST /ai/ask {chatId, content}
-    BE->>BE: Load last 6 messages of the chat
-    BE->>PY: POST /ask {workspace_id, question, chatHistory}
-    PY->>LLM: 1. Rewrite follow-up into a standalone question
-    PY->>LLM: 2. Generate 2–3 search-style rephrasings
-    PY->>PY: 3a. Dense search — FAISS top 15
-    PY->>PY: 3b. Keyword search — BM25 top 10
-    PY->>PY: 4. Numeric question + spreadsheet? → compute with pandas
-    PY->>PY: 5. Merge + de-duplicate candidates
-    PY->>LLM: 6. Score each candidate 0–10, keep top 6
-    PY->>LLM: 7. Answer from those 6 chunks only (strict prompt)
-    PY-->>BE: {answer}
-    BE->>BE: Save question + answer to MongoDB
-    BE-->>FE: {answer}
-```
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/question-flow-dark.svg">
+    <img src="docs/images/question-flow-light.svg" alt="Question flow: the backend adds recent chat history, the RAG engine rewrites and expands the question, runs FAISS and BM25 search, computes numbers with pandas when needed, de-duplicates and reranks candidates, and answers from the top 6 chunks" width="100%">
+  </picture>
+</p>
 
 ---
 
@@ -177,8 +157,19 @@ Accuracy starts at ingestion: section titles, page numbers and table rows are ke
 ├── structured/               # spreadsheet storage, header detection, NL queries
 ├── vectorstore/faiss_store.py
 ├── evaluation/ragas_accuracy.py
+├── docs/
+│   ├── diagrams/             # Mermaid sources of the README diagrams
+│   └── images/               # rendered light / dark SVGs
 ├── rag-platform/             # Spring Boot backend
 └── valora-frontend/          # React frontend
+```
+
+The README diagrams are SVG images rendered from the Mermaid sources in `docs/diagrams/` (images display reliably everywhere, unlike live Mermaid blocks). After editing a source, regenerate both versions with the shared config, which keeps labels as plain SVG text:
+
+```bash
+cd docs
+npx -p @mermaid-js/mermaid-cli mmdc -c diagrams/mermaid-config.json -t default -b white   -i diagrams/architecture.mmd -o images/architecture-light.svg
+npx -p @mermaid-js/mermaid-cli mmdc -c diagrams/mermaid-config.json -t dark    -b "#0d1117" -i diagrams/architecture.mmd -o images/architecture-dark.svg
 ```
 
 | Folder | What it is | Port |
