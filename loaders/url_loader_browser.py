@@ -123,8 +123,10 @@
 
 
 import os
+import re
+import uuid
 import requests
-from urllib.parse import urljoin
+from urllib.parse import urlparse, unquote
 from playwright.sync_api import sync_playwright, TimeoutError
 
 SUPPORTED_EXTENSIONS = (
@@ -132,28 +134,106 @@ SUPPORTED_EXTENSIONS = (
     ".xls", ".xlsx", ".csv"
 )
 
+# Server-reported type → extension, for links like /download?id=123
+CONTENT_TYPE_EXTENSIONS = {
+    "application/pdf": ".pdf",
+    "application/msword": ".doc",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    "application/vnd.ms-powerpoint": ".ppt",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+    "application/vnd.ms-excel": ".xls",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+    "text/csv": ".csv",
+}
 
-def _direct_download(url, download_dir):
+# Links without a file extension are only fetched if they look like downloads
+DOWNLOAD_HINTS = ("download", "attachment", "file", "export", "document", "pdf", "doc")
+
+MAX_DOCUMENTS = 50        # documents downloaded per page
+MAX_UNKNOWN_CHECKS = 30   # extensionless links fetched to check their type
+
+
+def _extension_from_url(url):
+    # look at the path only, so "report.pdf?version=2" still counts
+    ext = os.path.splitext(unquote(urlparse(url).path))[1].lower()
+    return ext if ext in SUPPORTED_EXTENSIONS else None
+
+
+def _looks_like_download(url, text):
+    haystack = f"{url} {text}".lower()
+    return any(hint in haystack for hint in DOWNLOAD_HINTS)
+
+
+def _filename_from_response(url, headers, ext):
+    # prefer the server's name: Content-Disposition: attachment; filename="x.pdf"
+    disposition = headers.get("content-disposition", "")
+    match = re.search(r'filename\*?=(?:UTF-8\'\')?"?([^";]+)"?', disposition, re.I)
+    name = unquote(match.group(1)) if match else os.path.basename(unquote(urlparse(url).path))
+
+    name = re.sub(r"[^\w.\- ]", "_", name).strip() or "document"
+    if not name.lower().endswith(ext):
+        name += ext
+    return name
+
+
+def _unique_path(download_dir, name):
+    path = os.path.join(download_dir, name)
+    base, ext = os.path.splitext(path)
+    i = 1
+    while os.path.exists(path):
+        path = f"{base}_{i}{ext}"
+        i += 1
+    return path
+
+
+def _fetch(context, url):
+    """
+    Fetch through the browser session first (keeps the site's cookies),
+    fall back to a plain HTTP request.
+    Returns (body, headers) or (None, None).
+    """
     try:
-        resp = requests.get(url, timeout=30, stream=True)
+        resp = context.request.get(url, timeout=30000)
+        if resp.ok:
+            return resp.body(), {k.lower(): v for k, v in resp.headers.items()}
+    except Exception as e:
+        print(f"⚠ Browser fetch failed: {e}")
+
+    try:
+        resp = requests.get(url, timeout=30)
         resp.raise_for_status()
-
-        filename = url.split("/")[-1].split("?")[0]
-        path = os.path.join(download_dir, filename)
-
-        with open(path, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=8192):
-                f.write(chunk)
-
-        print(f"⬇ Downloaded (direct): {filename}")
-        return path
-
+        return resp.content, {k.lower(): v for k, v in resp.headers.items()}
     except Exception as e:
         print(f"⚠ Direct download failed: {e}")
+        return None, None
+
+
+def _download(context, url, download_dir, ext):
+    body, headers = _fetch(context, url)
+    if body is None:
         return None
+
+    content_type = headers.get("content-type", "").split(";")[0].strip().lower()
+
+    # a "document" link that returns a web page (login, error page) is skipped
+    if content_type == "text/html":
+        return None
+
+    ext = ext or CONTENT_TYPE_EXTENSIONS.get(content_type)
+    if not ext:
+        return None
+
+    path = _unique_path(download_dir, _filename_from_response(url, headers, ext))
+    with open(path, "wb") as f:
+        f.write(body)
+
+    print(f"⬇ Downloaded: {os.path.basename(path)}")
+    return path
 
 
 def load_url_with_browser(url, download_dir="data/downloads"):
+    # each URL gets its own folder so files from different pages never clash
+    download_dir = os.path.join(download_dir, uuid.uuid4().hex[:12])
     os.makedirs(download_dir, exist_ok=True)
 
     page_text = ""
@@ -179,48 +259,43 @@ def load_url_with_browser(url, download_dir="data/downloads"):
             page_text = ""
 
         # =====================================================
-        # ✅ ONLY VISIBLE ANCHOR LINKS ARE COLLECTED
+        # Collect every link on the page (href is already absolute)
         # =====================================================
-        table = page.query_selector("table")
-        anchors = []
+        try:
+            links = page.eval_on_selector_all(
+                "a[href]",
+                "els => els.map(e => [e.href, e.innerText || ''])"
+            )
+        except:
+            links = []
 
-        if table:
-            anchors = table.query_selector_all("a[href]")
+        seen = set()
+        unknown_checks = 0
 
+        for href, text in links:
+            if len(downloaded_files) >= MAX_DOCUMENTS:
+                print(f"⚠ Reached {MAX_DOCUMENTS} documents — skipping the rest")
+                break
 
-        for anchor in anchors:
-            href = anchor.get_attribute("href")
-            if not href:
+            full_url = href.split("#")[0]
+            if not full_url.startswith(("http://", "https://")) or full_url in seen:
                 continue
+            seen.add(full_url)
 
-            full_url = urljoin(url, href)
-            lower = full_url.lower()
+            ext = _extension_from_url(full_url)
 
-            if not lower.endswith(SUPPORTED_EXTENSIONS):
-                continue
+            if not ext:
+                # no extension: only check links that look like downloads
+                if not _looks_like_download(full_url, text):
+                    continue
+                if unknown_checks >= MAX_UNKNOWN_CHECKS:
+                    continue
+                unknown_checks += 1
 
-            # 1️⃣ Try browser-triggered download
-            try:
-                with page.expect_download(timeout=5000) as d_info:
-                    anchor.click()
-
-                download = d_info.value
-                filename = download.suggested_filename
-                save_path = os.path.join(download_dir, filename)
-                download.save_as(save_path)
-
-                print(f"⬇ Downloaded (browser): {filename}")
-                downloaded_files.append(save_path)
-                continue
-
-            except:
-                pass
-
-            # 2️⃣ Fallback direct HTTP download
-            path = _direct_download(full_url, download_dir)
+            path = _download(context, full_url, download_dir, ext)
             if path:
                 downloaded_files.append(path)
-            else:
+            elif ext:
                 print(f"⚠ Skipped: {full_url}")
 
         browser.close()
