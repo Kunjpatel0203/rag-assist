@@ -20,7 +20,9 @@ def extract_text(file_path: str):
     # ==========================
     # PDF / DOC / PPT
     # ==========================
-    elements = partition(filename=file_path, strategy="hi_res")
+    # "auto" (the default) reads the text layer directly and only falls back
+    # to OCR for scanned files; "hi_res" took minutes per PDF
+    elements = partition(filename=file_path)
 
     chunks = []
     current_section = "Unknown"   # 🔥 NEW

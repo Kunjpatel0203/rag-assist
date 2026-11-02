@@ -742,6 +742,75 @@ def save_chunks(compliance_id, block_id, source_name, chunks):
 
 
 # =============================
+# Chunk extracted elements
+# =============================
+def chunk_elements(elements):
+    """
+    extract_text() returns a list of {"text", "metadata"} elements.
+    Group consecutive elements of the same section and page, then
+    chunk each group so every chunk keeps its section/page metadata.
+    Small neighbouring groups are packed together so short headings
+    don't become tiny chunks of their own.
+    Returns (chunks, metadatas).
+    """
+    groups = []
+    for el in elements:
+        meta = el["metadata"]
+        key = (meta.get("section"), meta.get("page"))
+        if groups and groups[-1]["key"] == key:
+            groups[-1]["texts"].append(el["text"])
+            groups[-1]["types"].append(meta.get("type"))
+        else:
+            groups.append({
+                "key": key,
+                "texts": [el["text"]],
+                "types": [meta.get("type")],
+                "metadata": meta
+            })
+
+    # pack small groups up to the chunk size (800, see processing/chunker.py);
+    # a packed group keeps the section/page of its first part
+    packed = []
+    for g in groups:
+        size = sum(len(t) for t in g["texts"])
+        if packed and packed[-1]["size"] + size < CHUNK_SIZE:
+            packed[-1]["texts"] += g["texts"]
+            packed[-1]["types"] += g["types"]
+            packed[-1]["size"] += size
+        else:
+            packed.append({**g, "size": size})
+    groups = packed
+
+    chunks = []
+    metadatas = []
+    for g in groups:
+        section = g["metadata"].get("section") or "Unknown"
+        # the heading itself is a Title; describe the group by its body
+        body_types = [t for t in g["types"] if t != "Title"]
+        content_type = body_types[0] if body_types else "Title"
+
+        for piece in chunk_text("\n".join(g["texts"])):
+            # a heading split off on its own adds nothing: it is prefixed below
+            if piece.strip() == section and len(g["texts"]) > 1:
+                continue
+            # prefix the section title so the chunk carries its own context
+            if section != "Unknown" and not piece.startswith(section):
+                piece = f"{section}\n{piece}"
+            chunks.append(piece)
+            metadatas.append({
+                "section": section,
+                "page": g["metadata"].get("page"),
+                "content_type": content_type,
+            })
+
+    return chunks, metadatas
+
+
+EXCEL_EXTENSIONS = (".xlsx", ".xls", ".csv")
+CHUNK_SIZE = 800
+
+
+# =============================
 # INGEST BLOCKS
 # =============================
 def ingest_blocks(blocks, compliance_id):
@@ -814,23 +883,45 @@ def ingest_blocks(blocks, compliance_id):
                 })
 
             for path in downloaded_docs:
+                name = os.path.basename(path).replace(".", "_")
+
+                # Spreadsheets linked from the page use the row extractor
+                if path.lower().endswith(EXCEL_EXTENSIONS):
+                    try:
+                        row_chunks, row_metadata = excel_semantic_extractor(path)
+                    except Exception as e:
+                        print("[DOC EXTRACT ERROR]", e)
+                        continue
+
+                    save_chunks(compliance_id, block_id, name, row_chunks)
+
+                    for chunk, meta in zip(row_chunks, row_metadata):
+                        all_chunks.append(chunk)
+                        all_metadata.append({
+                            "compliance_id": compliance_id,
+                            "block_id": block_id,
+                            "source": path,
+                            "type": "excel_row",
+                            "numeric": meta["numeric"]
+                        })
+                    continue
+
                 try:
-                    text = extract_text(path)
+                    elements = extract_text(path)
                 except Exception as e:
                     print("[DOC EXTRACT ERROR]", e)
                     continue
 
-                doc_chunks = chunk_text(text)
-                name = os.path.basename(path).replace(".", "_")
-
+                doc_chunks, doc_metadata = chunk_elements(elements)
                 save_chunks(compliance_id, block_id, name, doc_chunks)
 
-                for c in doc_chunks:
+                for c, meta in zip(doc_chunks, doc_metadata):
                     all_chunks.append(c)
                     all_metadata.append({
                         "compliance_id": compliance_id,
                         "block_id": block_id,
                         "source": path,
+                        **meta,
                         "type": "url_document"
                     })
 
@@ -840,25 +931,23 @@ def ingest_blocks(blocks, compliance_id):
         # 📄 PDF / DOC / PPT
         # ==================================================
         try:
-            text = extract_text(value)
+            elements = extract_text(value)
         except Exception as e:
             print("[FILE EXTRACT ERROR]", e)
             continue
 
-        chunks = chunk_text(text)
+        chunks, chunk_metadata = chunk_elements(elements)
         name = os.path.basename(value).replace(".", "_")
         save_chunks(compliance_id, block_id, name, chunks)
 
-        for c in chunks:
+        for c, meta in zip(chunks, chunk_metadata):
             all_chunks.append(c)
             all_metadata.append({
                 "compliance_id": compliance_id,
                 "block_id": block_id,
                 "source": value,
-                # 🔥 NEW METADATA
-                 "section": chunk["metadata"]["section"],
-                 "page": chunk["metadata"]["page"],
-                 "content_type": chunk["metadata"]["type"],
+                # 🔥 NEW METADATA (section, page, content_type)
+                **meta,
                 "type": "unstructured"
             })
 
