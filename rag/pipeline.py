@@ -534,6 +534,7 @@ from loaders.url_loader_browser import load_url_with_browser
 
 from extractors.universal_extractor import extract_text
 
+from processing import embedder
 from processing.chunker import chunk_text
 from processing.embedder import get_embedder
 from processing.llm import get_llm
@@ -606,6 +607,34 @@ Return the rewritten queries in one line.
     # Combine original + rewritten for broader semantic match
     return question + " " + rewritten
 
+
+
+
+# def rewrite_query_for_retrieval(question: str, llm) -> str:
+#     """
+#     Rewrite the user question into alternative search-style queries
+#     to improve document retrieval.
+#     """
+#     prompt = f"""
+# You are helping a search engine retrieve documents.
+
+# Rewrite the user question into 2-3 alternative search queries
+# that might match how the same information is written in documents.
+
+# Do NOT answer the question.
+# Return only the rewritten search queries.
+
+# User question:
+# {question}
+# """
+
+#     try:
+#         rewritten = llm.invoke(prompt).content.strip()
+#         return question + " " + rewritten
+#     except:
+#         # fallback if LLM fails
+#         return question
+
 #### intent aware rewriting end
 
 
@@ -639,6 +668,47 @@ Return ONLY the number.
 
     scored.sort(key=lambda x: x[0], reverse=True)
     return [doc for _, doc in scored[:top_n]]
+
+
+
+
+# def rerank_documents(question: str, docs: list, llm, top_n: int = 6):
+#     """
+#     LLM-based reranking of retrieved documents.
+#     Uses batch scoring to reduce latency.
+#     """
+
+#     passages = "\n\n".join(
+#         [f"Passage {i+1}:\n{doc.page_content}" for i, doc in enumerate(docs)]
+#     )
+
+#     prompt = f"""
+# You are ranking document passages for relevance.
+
+# Question:
+# {question}
+
+# Below are passages retrieved from documents.
+
+# {passages}
+
+# Return the passage numbers sorted from MOST relevant to LEAST relevant.
+# Example output:
+# 3,1,5,2,4
+# Only return numbers separated by commas.
+# """
+
+#     try:
+#         result = llm.invoke(prompt).content.strip()
+
+#         order = [int(x.strip()) - 1 for x in result.split(",") if x.strip().isdigit()]
+
+#         ranked = [docs[i] for i in order if i < len(docs)]
+
+#         return ranked[:top_n]
+
+#     except:
+#         return docs[:top_n]
 
 #### rerank end
 
@@ -676,11 +746,11 @@ def save_chunks(compliance_id, block_id, source_name, chunks):
 # =============================
 def ingest_blocks(blocks, compliance_id):
     embed_path = f"{BASE_EMBED_DIR}/compliance_{compliance_id}"
-
+    store = None
     # Reuse embeddings if already exist
     if os.path.exists(f"{embed_path}/index.faiss"):
         print("✔ Loading existing embeddings (no OpenAI cost)")
-        return load_vector_store(embed_path)
+        store = load_vector_store(embed_path)
 
     print("⏳ Creating embeddings...")
 
@@ -785,6 +855,10 @@ def ingest_blocks(blocks, compliance_id):
                 "compliance_id": compliance_id,
                 "block_id": block_id,
                 "source": value,
+                # 🔥 NEW METADATA
+                 "section": chunk["metadata"]["section"],
+                 "page": chunk["metadata"]["page"],
+                 "content_type": chunk["metadata"]["type"],
                 "type": "unstructured"
             })
 
@@ -796,7 +870,14 @@ def ingest_blocks(blocks, compliance_id):
         return None
 
     embedder = get_embedder()
-    store = create_vector_store(all_chunks, all_metadata, embedder)
+    # If embeddings already exist → append
+    if store is not None:
+        print("➕ Adding new documents to existing vector store")
+        store.add_texts(all_chunks, all_metadata)
+
+    else:
+        print("🆕 Creating new vector store")
+        store = create_vector_store(all_chunks, all_metadata, embedder)
 
     os.makedirs(embed_path, exist_ok=True)
     store.save_local(embed_path)
@@ -936,6 +1017,15 @@ def ingest_blocks(blocks, compliance_id):
 
 
 
+
+
+
+
+
+
+
+
+
 def query_blocks(store, question, compliance_id):
     if store is None:
         return "No documents available."
@@ -1011,6 +1101,325 @@ def query_blocks(store, question, compliance_id):
     answer = llm.invoke(prompt).content.strip()
 
     return answer if answer else "Not found."
+
+
+# def query_blocks(store, question, compliance_id):
+
+#     if store is None:
+#         return "No documents available."
+
+#     llm = get_llm()
+
+#     # ---------- NO QUERY REWRITE ----------
+#     rewritten_query = question
+
+
+#     # ---------- DENSE SEARCH ----------
+#     dense_docs = store.similarity_search(
+#         rewritten_query,
+#         k=15,
+#         filter={"compliance_id": compliance_id}
+#     )
+#     # remove docs with invalid metadata
+#     dense_docs = [
+#         d for d in dense_docs
+#         if d.metadata and d.metadata.get("source") is not None
+#     ]
+
+#     # ---------- SPARSE SEARCH ----------
+#     chunk_dir = f"data/chunks/compliance_{compliance_id}"
+#     keyword_chunks = []
+
+#     if os.path.exists(chunk_dir):
+#         all_chunks = load_all_chunks(chunk_dir)
+#         keyword_chunks = bm25_search(rewritten_query, all_chunks, k=10)
+
+
+#     class TempDoc:
+#         def __init__(self, text):
+#             self.page_content = text
+#             self.metadata = {"type": "keyword"}
+
+
+#     sparse_docs = [TempDoc(c) for c in keyword_chunks]
+
+
+#     # ---------- MERGE RESULTS ----------
+#     docs = dense_docs + sparse_docs
+
+
+#     # ---------- NUMERIC AGGREGATION ----------
+#     retrieved_metadata = [d.metadata for d in dense_docs] if dense_docs else []
+
+#     structured_path = f"data/structured/compliance_{compliance_id}"
+#     excel_files = []
+
+#     if os.path.exists(structured_path):
+#         excel_files = [f for f in os.listdir(structured_path) if f.endswith(".xlsx")]
+
+#     structured_excel_path = (
+#         os.path.join(structured_path, excel_files[0])
+#         if excel_files else None
+#     )
+
+#     numeric_answer = numeric_aggregate(
+#         retrieved_metadata,
+#         question,
+#         structured_excel_path
+#     )
+
+#     if numeric_answer:
+#         return numeric_answer
+
+
+#     # ---------- REMOVE DUPLICATES ----------
+#     unique = {}
+
+#     for d in docs:
+#         unique[d.page_content[:500]] = d
+
+#     docs = list(unique.values())
+
+
+#     if not docs:
+#         return "Not found in provided documents."
+
+
+#     # ---------- FINAL ANSWER ----------
+#     context = "\n".join(d.page_content for d in docs)
+
+#     prompt = build_prompt(context, question)
+
+#     answer = llm.invoke(prompt).content.strip()
+
+#     return answer if answer else "Not found."
+
+
+##### this version with bm25 +reranking  
+# def query_blocks(store, question, compliance_id):
+
+#     if store is None:
+#         return "No documents available."
+
+#     llm = get_llm()
+#     embedder = get_embedder()
+
+#     # -----------------------------
+#     # QUERY NORMALIZATION
+#     # -----------------------------
+#     q = question.lower().strip()
+
+#     # -----------------------------
+#     # FOLLOW-UP QUESTION HANDLING
+#     # -----------------------------
+#     reference_words = [" it ", " they ", " them ", " those ", " that ", " these "]
+
+#     expanded_query = question
+
+#     if any(w in f" {q} " for w in reference_words):
+#         expanded_query = question + " context information explanation"
+
+#     # -----------------------------
+#     # DENSE RETRIEVAL (FAISS)
+#     # -----------------------------
+#     dense_docs = store.similarity_search(
+#         expanded_query,
+#         k=10,
+#         filter={"compliance_id": compliance_id}
+#     )
+
+#     # -----------------------------
+#     # SPARSE RETRIEVAL (BM25)
+#     # -----------------------------
+#     chunk_dir = f"data/chunks/compliance_{compliance_id}"
+#     sparse_docs = []
+
+#     if os.path.exists(chunk_dir):
+
+#         all_chunks = load_all_chunks(chunk_dir)
+
+#         keyword_chunks = bm25_search(expanded_query, all_chunks, k=10)
+
+#         class TempDoc:
+#             def __init__(self, text):
+#                 self.page_content = text
+#                 self.metadata = {"type": "keyword"}
+
+#         sparse_docs = [TempDoc(c) for c in keyword_chunks]
+
+#     # -----------------------------
+#     # MERGE RESULTS
+#     # -----------------------------
+#     docs = dense_docs + sparse_docs
+
+#     # -----------------------------
+#     # REMOVE DUPLICATES
+#     # -----------------------------
+#     unique = {}
+
+#     for d in docs:
+#         key = d.page_content[:300]
+#         unique[key] = d
+
+#     docs = list(unique.values())
+
+#     if not docs:
+#         return "Not found in provided documents."
+
+#     # -----------------------------
+#     # EMBEDDING RERANKING
+#     # -----------------------------
+#     query_vec = embedder.embed_query(expanded_query)
+
+#     def score(doc):
+#         doc_vec = embedder.embed_query(doc.page_content[:1000])
+#         return sum(a * b for a, b in zip(query_vec, doc_vec))
+
+#     docs = sorted(docs, key=score, reverse=True)
+
+#     # -----------------------------
+#     # LIMIT CONTEXT
+#     # -----------------------------
+#     docs = docs[:6]
+
+#     context = "\n".join(d.page_content for d in docs)
+
+#     # -----------------------------
+#     # LLM ANSWER
+#     # -----------------------------
+#     prompt = build_prompt(context, question)
+
+#     answer = llm.invoke(prompt).content.strip()
+
+#     return answer if answer else "Not found."
+
+
+#####version over
+
+
+
+
+
+
+
+
+
+# def query_blocks(store, question, compliance_id):
+
+#     if store is None:
+#         return "No documents available."
+
+#     llm = get_llm()
+
+#     # -------------------------
+#     # INTENT-AWARE REWRITE
+#     # -------------------------
+#     rewritten_query = rewrite_query_for_retrieval(question, llm)
+
+#     # -------------------------
+#     # DENSE SEARCH (FAISS)
+#     # -------------------------
+#     dense_docs = store.similarity_search(
+#         rewritten_query,
+#         k=12,
+#         filter={"compliance_id": compliance_id}
+#     )
+
+#     # remove docs with bad metadata
+#     dense_docs = [
+#         d for d in dense_docs
+#         if d.metadata and d.metadata.get("source") is not None
+#     ]
+
+#     # -------------------------
+#     # SPARSE SEARCH (BM25)
+#     # -------------------------
+#     chunk_dir = f"data/chunks/compliance_{compliance_id}"
+#     keyword_chunks = []
+
+#     if os.path.exists(chunk_dir):
+#         all_chunks = load_all_chunks(chunk_dir)
+#         keyword_chunks = bm25_search(rewritten_query, all_chunks, k=8)
+
+#     class TempDoc:
+#         def __init__(self, text):
+#             self.page_content = text
+#             self.metadata = {"type": "keyword"}
+
+#     sparse_docs = [TempDoc(c) for c in keyword_chunks]
+
+#     # -------------------------
+#     # MERGE RESULTS
+#     # -------------------------
+#     docs = dense_docs + sparse_docs
+
+#     # -------------------------
+#     # NUMERIC AGGREGATION
+#     # -------------------------
+#     retrieved_metadata = [d.metadata for d in dense_docs] if dense_docs else []
+
+#     structured_path = f"data/structured/compliance_{compliance_id}"
+#     excel_files = []
+
+#     if os.path.exists(structured_path):
+#         excel_files = [f for f in os.listdir(structured_path) if f.endswith(".xlsx")]
+
+#     structured_excel_path = (
+#         os.path.join(structured_path, excel_files[0])
+#         if excel_files else None
+#     )
+
+#     numeric_answer = numeric_aggregate(
+#         retrieved_metadata,
+#         question,
+#         structured_excel_path
+#     )
+
+#     if numeric_answer:
+#         return numeric_answer
+
+#     # -------------------------
+#     # REMOVE DUPLICATES
+#     # -------------------------
+#     unique = {}
+
+#     for d in docs:
+#         key = d.page_content[:500]
+#         unique[key] = d
+
+#     docs = list(unique.values())
+
+#     if not docs:
+#         return "No relevant information found in uploaded documents."
+
+#     # -------------------------
+#     # LIGHT RERANK (embedding)
+#     # -------------------------
+#     embedder = get_embedder()
+#     query_vec = embedder.embed_query(rewritten_query)
+
+#     def score(doc):
+#         doc_vec = embedder.embed_query(doc.page_content[:800])
+#         return sum(a*b for a, b in zip(query_vec, doc_vec))
+
+#     docs = sorted(docs, key=score, reverse=True)
+
+#     # keep only best chunks
+#     docs = docs[:6]
+
+#     # -------------------------
+#     # FINAL LLM ANSWER
+#     # -------------------------
+#     context = "\n".join(d.page_content for d in docs)
+
+#     prompt = build_prompt(context, question)
+
+#     try:
+#         answer = llm.invoke(prompt).content.strip()
+#     except:
+#         return "Error generating answer."
+
+#     return answer if answer else "Not found in provided documents."
 
 
 

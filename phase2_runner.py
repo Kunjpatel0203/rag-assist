@@ -90,27 +90,27 @@
 #     return "\n\n".join(answers)
 
 
-
 from rag.pipeline import query_blocks
 
 
 def run_phase2(question, compliance_id, rag_store):
-    """
-    FINAL HYBRID EXECUTION PIPELINE
 
-    This directly uses the Hybrid Semantic RAG system:
-    - Excel semantic row retrieval
-    - Numeric aggregation if needed
-    - Normal RAG for text answers
-    - Works for PDFs, URLs, Docs, PPT unchanged
+    """
+    Hybrid RAG execution pipeline
     """
 
     if rag_store is None:
         return "No documents available."
 
-    answer = query_blocks(rag_store, question, compliance_id)
+    answer = query_blocks(
+        rag_store,
+        question,
+        compliance_id
+    )
 
     if not answer or answer.lower().startswith(("not found", "no documents")):
         return "No relevant information found in uploaded documents."
 
     return answer
+
+
